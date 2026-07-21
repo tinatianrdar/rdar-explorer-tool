@@ -732,7 +732,7 @@ function parseQuery(q){
                                                               // names containing them still resolve
                                                               // ("Capacity FUNDING", "Producer PROGRAM")
   for(const tier of ["exact","fuzzy"]){                       // deterministic lookups first, fuzzy second
-    for(let n=Math.min(4,tokens.length);n>=1;n--){            // greedy longest span within each tier
+    for(let n=Math.min(7,tokens.length);n>=1;n--){            // greedy longest span within each tier (7 covers the longest canonical names)
       for(let i=0;i+n<=tokens.length;i++){
         if(consumed.slice(i,i+n).some(Boolean)) continue;
         const span=tokens.slice(i,i+n);
@@ -790,6 +790,12 @@ function countBy(rows,key){
   return [...m.entries()].sort((a,b)=>b[1]-a[1]);
 }
 function uniqueIds(rows){ return new Set(rows.filter(r=>r.p).map(r=>r.p)).size; }
+function shortQueryName(instName){
+  const e=instByName.get(instName); if(!e) return instName;
+  const opts=[instName,...(e.al||[])];
+  opts.sort((a,b)=>normalizeName(a,false).split(" ").length-normalizeName(b,false).split(" ").length||a.length-b.length);
+  return opts[0];
+}
 function instLink(n){ return n?`<a href="#/institution/${enc(n)}">${esc(n)}</a>`:dash; }
 function topicLink(n){ return n?`<a href="#/topic/${enc(n)}">${esc(n)}</a>`:dash; }
 function progLink(n){ return n?`<a href="#/program/${enc(n)}">${esc(n)}</a>`:dash; }
@@ -1350,8 +1356,19 @@ function viewInstitution(name){
   if(!inst){app.innerHTML=`<div class="empty"><div class="big">Institution not found</div><a href="#/institutions">Back to Institutions</a></div>`;return;}
   const all=R.filter(r=>r.i===name), pubRows=all.filter(r=>r.pub===1);
   const state={page:1,per:25};
-  const byYear=countBy(pubRows,"y").sort((a,b)=>a[0].localeCompare(b[0]));
+  const yearOf=r=>fyOf(r.d0)||r.y;
+  const fys=fyRange();
+  const perYear=new Map(); pubRows.forEach(r=>{const L=yearOf(r); if(L) perYear.set(L,(perYear.get(L)||0)+1);});
+  const yearCounts=fys.map(L=>perYear.get(L)||0);
+  let cumV=0; const cumCounts=yearCounts.map(v=>cumV+=v);
+  const datedN=pubRows.filter(r=>yearOf(r)).length;
   const byProg=countBy(pubRows,"g"), byArea=countBy(pubRows,"a").slice(0,8);
+  const stages=countBy(pubRows,"s");
+  const topicRowsI=countBy(pubRows.filter(r=>r.a&&r.a!=="General Agriculture Research"),"a").slice(0,8).map(([a])=>({label:a,link:"#/topic/"+enc(a)}));
+  const hmCountsI=new Map();
+  pubRows.forEach(r=>{const L=yearOf(r); if(!r.a||!L) return; hmCountsI.set(r.a+"|"+L,(hmCountsI.get(r.a+"|"+L)||0)+1);});
+  const showHeatmap=datedN>=12&&topicRowsI.length>=2;
+  const qName=shortQueryName(name);
   const variantCounts=new Map();
   all.forEach(r=>{if(r.o)variantCounts.set(r.o,(variantCounts.get(r.o)||0)+1);});
   (inst.v||[]).forEach(v=>{if(!variantCounts.has(v))variantCounts.set(v,0);});
@@ -1384,26 +1401,36 @@ function viewInstitution(name){
       <p class="note" style="margin-top:8px">Scores computed live with the ported Method 1 similarity() function — they reproduce the Python report.</p>
     </div>
   </div>
+  ${pubRows.length>=3?`<div class="grid g2" style="margin-top:14px">
+    <div class="card"><h4 class="section-title" style="margin-top:0;font-size:15px">Public records by year</h4>
+      <div style="height:180px"><canvas id="instYearLine"></canvas></div>
+      <p class="note" style="margin-top:8px">${num(datedN)} of ${num(pubRows.length)} records have a recorded start date and appear in this trend.</p></div>
+    <div class="card"><h4 class="section-title" style="margin-top:0;font-size:15px">History with RDAR — cumulative</h4>
+      <div style="height:180px"><canvas id="instCumuLine"></canvas></div>
+      <p class="note" style="margin-top:8px">Running total of this institution’s dated public records.</p></div>
+  </div>`:""}
   <div class="grid g3" style="margin-top:14px">
-    <div class="card"><h4 class="section-title" style="margin-top:0;font-size:15px">Public records by year</h4>${bars(byYear)}</div>
-    <div class="card"><h4 class="section-title" style="margin-top:0;font-size:15px">By program</h4>${bars(byProg,{linkFn:progLink})}</div>
-    <div class="card"><h4 class="section-title" style="margin-top:0;font-size:15px">By research topic</h4>${bars(byArea,{gold:true,linkFn:topicLink})}</div>
+    <div class="card"><h4 class="section-title" style="margin-top:0;font-size:15px">By program</h4>${bars(byProg,{linkFn:progLink,total:pubRows.length})}</div>
+    <div class="card"><h4 class="section-title" style="margin-top:0;font-size:15px">By research topic</h4>${bars(byArea,{gold:true,linkFn:topicLink,total:pubRows.length})}</div>
+    <div class="card"><h4 class="section-title" style="margin-top:0;font-size:15px">Project stage</h4>
+      ${stages.length>=2?`<div style="height:180px"><canvas id="instStageDonut"></canvas></div>`
+        :stages.length===1?`<p style="margin-top:6px">All ${num(stages[0][1])} public record${stages[0][1]===1?" is":"s are"} <strong>${esc(stages[0][0])}</strong>.</p>`
+        :'<div class="note">No data recorded.</div>'}</div>
   </div>
-  ${pubRows.length>=3?`<div class="card" style="margin-top:14px">
-    <h4 class="section-title" style="margin-top:0;font-size:15px">History with RDAR — cumulative public records</h4>
-    <div style="height:190px"><canvas id="instCumu"></canvas></div>
-    <p class="note" style="margin-top:8px">Running total of dated public records — ${num(pubRows.filter(r=>r.d0||r.y).length)} of ${num(pubRows.length)} for this institution have a recorded start date.</p>
+  ${showHeatmap?`<div class="card" style="margin-top:14px">
+    <h4 class="section-title" style="margin-top:0;font-size:15px">Research topics by fiscal year</h4>
+    ${heatmap(topicRowsI,fys,(i,j)=>hmCountsI.get(topicRowsI[i].label+"|"+fys[j])||0,{colShort:c=>"’"+c.slice(2),cellHref:(i,j)=>"#/search?q="+enc(qName+" "+topicRowsI[i].label+" "+fys[j]),colHref:(j)=>"#/years/"+enc(fys[j])})}
+    <p class="note" style="margin-top:8px">Click any cell to open that topic-and-year combination for this institution. Shown for institutions with 12+ dated records.</p>
   </div>`:""}
   <h3 class="section-title">Public project records (${num(pubRows.length)})</h3>
   <div class="toolbar"><button class="btn primary" id="instExport" style="margin-left:auto">Export results (CSV)</button></div>
   <div id="instProjTable"></div>`;
   destroyCharts();
   if(pubRows.length>=3){
-    const fys=fyRange();
-    let cum=0;
-    const cumu=fys.map(L=>{ cum+=pubRows.filter(r=>(fyOf(r.d0)||r.y)===L).length; return cum; });
-    lineChart("instCumu",fys,cumu,"Cumulative records");
+    lineChart("instYearLine",fys,yearCounts,"Public records");
+    lineChart("instCumuLine",fys,cumCounts,"Cumulative records");
   }
+  if(stages.length>=2) donutChart("instStageDonut",stages,STAGE_COLORS,s=>"#/search?q="+enc(qName+" "+s));
   document.getElementById("instExport").onclick=()=>exportCSV(pubRows,`rdar_${name.replace(/[^a-z0-9]+/gi,"_").toLowerCase()}.csv`);
   const c=document.getElementById("instProjTable");
   const rer=()=>{c.innerHTML=projectTable(pubRows,state,rer);bindPager(c,state,rer);};
@@ -1456,8 +1483,19 @@ function viewProgram(name){
   if(!p){app.innerHTML=`<div class="empty"><div class="big">Program not found</div><a href="#/programs">Back to Programs</a></div>`;return;}
   const rows=PUB.filter(r=>r.g===name);
   const state={page:1,per:25};
-  const byYear=countBy(rows,"y").sort((a,b)=>a[0].localeCompare(b[0]));
+  const yearOf=r=>fyOf(r.d0)||r.y;
+  const fys=fyRange();
+  const perYear=new Map(); rows.forEach(r=>{const L=yearOf(r); if(L) perYear.set(L,(perYear.get(L)||0)+1);});
+  const yearCounts=fys.map(L=>perYear.get(L)||0);
+  let cum=0; const cumCounts=yearCounts.map(v=>cum+=v);
+  const datedN=rows.filter(r=>yearOf(r)).length;
   const insts=countBy(rows,"i").slice(0,8), areas=countBy(rows,"a").slice(0,8);
+  const stages=countBy(rows,"s");
+  const topInstN=Math.min(3,insts.length);
+  const topInstShare=(rows.length&&topInstN)?Math.round(insts.slice(0,topInstN).reduce((s,[,v])=>s+v,0)/rows.length*100):0;
+  const topicRows=countBy(rows.filter(r=>r.a&&r.a!=="General Agriculture Research"),"a").slice(0,8).map(([a])=>({label:a,link:"#/topic/"+enc(a)}));
+  const hmCounts=new Map();
+  rows.forEach(r=>{const L=yearOf(r); if(!r.a||!L) return; hmCounts.set(r.a+"|"+L,(hmCounts.get(r.a+"|"+L)||0)+1);});
   app.innerHTML=`<div class="crumb"><a href="#/home">Home</a> / <a href="#/programs">Programs</a> / ${esc(name)}</div>
   <h1 class="page-title">${esc(name)}</h1>
   <p class="page-sub">${esc(p.desc||"")}</p>
@@ -1466,15 +1504,35 @@ function viewProgram(name){
     <div class="kpi"><div class="v">${num(uniqueIds(rows))}</div><div class="l">Unique project IDs</div></div>
     <div class="kpi gold"><div class="v">${num(new Set(rows.map(r=>r.i).filter(Boolean)).size)}</div><div class="l">Institutions</div></div>
   </div>
-  <div class="grid g3" style="margin-top:16px">
-    <div class="card"><h4 class="section-title" style="margin-top:0;font-size:15px">Records by year</h4>${bars(byYear)}</div>
-    <div class="card"><h4 class="section-title" style="margin-top:0;font-size:15px">Top institutions</h4>${bars(insts,{linkFn:instLink})}</div>
-    <div class="card"><h4 class="section-title" style="margin-top:0;font-size:15px">Research topics</h4>${bars(areas,{gold:true,linkFn:topicLink})}</div>
+  <div class="grid g2" style="margin-top:16px">
+    <div class="card"><h4 class="section-title" style="margin-top:0;font-size:15px">Records by year</h4>
+      <div style="height:190px"><canvas id="progYearLine"></canvas></div>
+      <p class="note" style="margin-top:8px">${num(datedN)} of ${num(rows.length)} records have a recorded start date and appear in this trend.</p></div>
+    <div class="card"><h4 class="section-title" style="margin-top:0;font-size:15px">Cumulative records over time</h4>
+      <div style="height:190px"><canvas id="progCumuLine"></canvas></div>
+      <p class="note" style="margin-top:8px">Running total of this program’s dated public records.</p></div>
   </div>
+  <div class="grid g3" style="margin-top:14px">
+    <div class="card"><h4 class="section-title" style="margin-top:0;font-size:15px">Top institutions</h4>${bars(insts,{linkFn:instLink,total:rows.length})}
+      ${insts.length?`<p class="note" style="margin-top:8px">Top ${num(topInstN)} institution${topInstN===1?"":"s"} account for ${topInstShare}% of this program’s public records.</p>`:""}</div>
+    <div class="card"><h4 class="section-title" style="margin-top:0;font-size:15px">Research topics</h4>${bars(areas,{gold:true,linkFn:topicLink,total:rows.length})}</div>
+    <div class="card"><h4 class="section-title" style="margin-top:0;font-size:15px">Project stage</h4>
+      ${stages.length>=2?`<div style="height:190px"><canvas id="progStageDonut"></canvas></div>`
+        :stages.length===1?`<p style="margin-top:6px">All ${num(stages[0][1])} public record${stages[0][1]===1?" is":"s are"} <strong>${esc(stages[0][0])}</strong>.</p>`
+        :'<div class="note">No data recorded.</div>'}</div>
+  </div>
+  ${topicRows.length>1?`<div class="card" style="margin-top:14px">
+    <h4 class="section-title" style="margin-top:0;font-size:15px">Research topics by fiscal year</h4>
+    ${heatmap(topicRows,fys,(i,j)=>hmCounts.get(topicRows[i].label+"|"+fys[j])||0,{colShort:c=>"’"+c.slice(2),cellHref:(i,j)=>"#/search?q="+enc(name+" "+topicRows[i].label+" "+fys[j]),colHref:(j)=>"#/years/"+enc(fys[j])})}
+    <p class="note" style="margin-top:8px">Click any cell to open that topic-and-year combination within this program. Fallback category excluded; topics are inferred.</p>
+  </div>`:""}
   <h3 class="section-title">Public project records (${num(rows.length)})</h3>
   <div class="toolbar"><button class="btn primary" id="progExport" style="margin-left:auto">Export results (CSV)</button></div>
   <div id="progTable"></div>`;
   destroyCharts();
+  lineChart("progYearLine",fys,yearCounts,"Public records");
+  lineChart("progCumuLine",fys,cumCounts,"Cumulative records");
+  if(stages.length>=2) donutChart("progStageDonut",stages,STAGE_COLORS,s=>"#/search?q="+enc(name+" "+s));
   document.getElementById("progExport").onclick=()=>exportCSV(rows,`rdar_program_${name.replace(/[^a-z0-9]+/gi,"_").toLowerCase()}.csv`);
   const c=document.getElementById("progTable");
   const rer=()=>{c.innerHTML=projectTable(rows,state,rer);bindPager(c,state,rer);};
@@ -1551,7 +1609,9 @@ function viewTopic(name){
       ${insts.length?`<p class="note" style="margin-top:8px">Top ${num(topInstN)} institution${topInstN===1?"":"s"} account for ${topInstShare}% of this topic's public records.</p>`:""}</div>
     <div class="card"><h4 class="section-title" style="margin-top:0;font-size:15px">Programs</h4>${bars(progs,{gold:true,linkFn:progLink,total:rows.length})}</div>
     <div class="card"><h4 class="section-title" style="margin-top:0;font-size:15px">Project stage</h4>
-      ${stages.length?`<div style="height:190px"><canvas id="topicStageDonut"></canvas></div>`:'<div class="note">No data recorded.</div>'}</div>
+      ${stages.length>=2?`<div style="height:190px"><canvas id="topicStageDonut"></canvas></div>`
+        :stages.length===1?`<p style="margin-top:6px">All ${num(stages[0][1])} public record${stages[0][1]===1?" is":"s are"} <strong>${esc(stages[0][0])}</strong>.</p>`
+        :'<div class="note">No data recorded.</div>'}</div>
   </div>
   ${progRows.length>1?`<div class="card" style="margin-top:14px">
     <h4 class="section-title" style="margin-top:0;font-size:15px">Programs by fiscal year</h4>
@@ -1565,7 +1625,7 @@ function viewTopic(name){
   destroyCharts();
   lineChart("topicYearLine",fys,yearCounts,"Public records");
   lineChart("topicCumuLine",fys,cumCounts,"Cumulative records");
-  if(stages.length) donutChart("topicStageDonut",stages,STAGE_COLORS,s=>"#/search?q="+enc(name+" "+s));
+  if(stages.length>=2) donutChart("topicStageDonut",stages,STAGE_COLORS,s=>"#/search?q="+enc(name+" "+s));
   document.getElementById("topExport").onclick=()=>exportCSV(rows,`rdar_topic_${name.replace(/[^a-z0-9]+/gi,"_").toLowerCase()}.csv`);
   const c=document.getElementById("topTable");
   const rer=()=>{c.innerHTML=projectTable(rows,state,rer);bindPager(c,state,rer);};
